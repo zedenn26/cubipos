@@ -21,7 +21,12 @@ import {
 import Link from "next/link";
 import { useWorkspace, rpc } from "@/components/workspace";
 import { supabase } from "@/lib/supabase/client";
-import { calculateTax, TaxMode } from "@/lib/pos";
+import {
+  calculateTax,
+  splitTaxComponents,
+  type TaxComponents,
+  type TaxMode,
+} from "@/lib/pos";
 import { userMessage } from "@/lib/permissions/errors";
 import { CameraScanner } from "@/components/scanner/camera";
 import { Form, Row, DataTable } from "@/components/operations/common";
@@ -89,6 +94,12 @@ function ActiveCounter() {
   const [held, setHeld] = useState<Row[]>([]);
   const [shift, setShift] = useState<Row | null>(null);
   const [registerLoading, setRegisterLoading] = useState(true);
+  const [taxFramework, setTaxFramework] = useState("GST");
+  const [taxComponents, setTaxComponents] = useState<TaxComponents>((): TaxComponents =>
+    String(entity.country_code).trim() === "IN"
+      ? { CGST: 50, SGST: 50 }
+      : { Tax: 100 },
+  );
   const [payments, setPayments] = useState<
     Array<{ method: string; amount: string }>
   >(() => {
@@ -108,6 +119,16 @@ function ActiveCounter() {
       style: "currency",
       currency: String(entity.currency_code ?? "INR"),
     }).format(v);
+  const finalUnitPrice = (product: Product) =>
+    calculateTax(
+      Number(product.selling_price),
+      Number(product.resolved_tax_rate),
+      product.tax_mode.replace("_", "-") as TaxMode,
+    ).gross;
+  const productTaxLabel = (product: Product) =>
+    product.tax_mode === "exempt" || product.tax_mode === "zero_rated"
+      ? "No tax"
+      : `${Number(product.resolved_tax_rate)}% ${taxFramework} included`;
   const totals = lines.map((l) =>
     calculateTax(
       Number(l.selling_price) * l.quantity * (1 - l.discount_percent / 100),
@@ -116,6 +137,35 @@ function ActiveCounter() {
     ),
   );
   const total = Math.round(totals.reduce((n, t) => n + t.gross, 0) * 100) / 100;
+  const componentTotals = totals.reduce<TaxComponents>((components, line) => {
+    for (const [name, amount] of Object.entries(
+      splitTaxComponents(line.tax, taxComponents),
+    ))
+      components[name] =
+        Math.round(((components[name] ?? 0) + amount) * 100) / 100;
+    return components;
+  }, {});
+  useEffect(() => {
+    let active = true;
+    void supabase!
+      .from("entity_settings")
+      .select("tax_framework,tax_components")
+      .eq("entity_id", profile.entity_id)
+      .maybeSingle()
+      .then(({ data, error }) => {
+        if (!active || error || !data) return;
+        setTaxFramework(String(data.tax_framework ?? "Tax"));
+        if (
+          data.tax_components &&
+          typeof data.tax_components === "object" &&
+          !Array.isArray(data.tax_components)
+        )
+          setTaxComponents(data.tax_components as TaxComponents);
+      });
+    return () => {
+      active = false;
+    };
+  }, [profile.entity_id]);
   useEffect(() => {
     try {
       localStorage.setItem(
@@ -439,7 +489,8 @@ function ActiveCounter() {
                 <span className="product-copy">
                   <strong>{p.name}</strong>
                   <small>{p.sku}</small>
-                  <span className="product-price">{money(Number(p.selling_price))}</span>
+                  <span className="product-price">{money(finalUnitPrice(p))}</span>
+                  <small>{productTaxLabel(p)}</small>
                 </span>
                 <span className="add-product" aria-hidden="true"><Plus size={17} /></span>
               </button>
@@ -533,7 +584,7 @@ function ActiveCounter() {
               <span className={`cart-thumb tone-${index % 6}`}>{l.name.slice(0, 2).toUpperCase()}</span>
               <div className="cart-product">
                 <strong>{l.name}</strong>
-                <small>{money(Number(l.selling_price))} · {l.sku}</small>
+                <small>{money(finalUnitPrice(l))} incl. tax · {productTaxLabel(l)} · {l.sku}</small>
                 <label>
                   Quantity
                   <input
@@ -612,8 +663,14 @@ function ActiveCounter() {
               <span>Items</span>
               <span>{lines.reduce((sum, line) => sum + Number(line.quantity), 0)}</span>
             </div>
+            {Object.entries(componentTotals).map(([name, amount]) => (
+              <div className="row" key={name}>
+                <span>{name}</span>
+                <span>{money(amount)}</span>
+              </div>
+            ))}
             <div className="row">
-              <span>Tax</span>
+              <span>Total {taxFramework}</span>
               <span>{money(totals.reduce((n, t) => n + t.tax, 0))}</span>
             </div>
             <div className="row">

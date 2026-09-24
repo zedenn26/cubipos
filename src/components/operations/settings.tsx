@@ -130,21 +130,21 @@ export function SettingsPanel() {
               },
               {
                 name: "tax_components",
-                label: "Invoice tax components",
+                label: "GST / tax shown on POS and receipts",
                 options:
                   String(entity.country_code).trim() === "IN"
                     ? [
                         {
                           value: '{"CGST":50,"SGST":50}',
-                          label: "CGST + SGST (equal split)",
+                          label: "Both CGST + SGST (equal split)",
                         },
                         {
                           value: '{"IGST":100}',
-                          label: "IGST",
+                          label: "IGST only",
                         },
                         {
                           value: '{"GST":100}',
-                          label: "GST (single component)",
+                          label: "GST only (single component)",
                         },
                       ]
                     : [

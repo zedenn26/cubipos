@@ -6,6 +6,8 @@ export type TaxResult = {
   gross: number;
 };
 
+export type TaxComponents = Record<string, number>;
+
 const cents = (value: number) => Math.round((value + Number.EPSILON) * 100) / 100;
 
 export function calculateTax(price: number, rate: number, mode: TaxMode): TaxResult {
@@ -16,6 +18,40 @@ export function calculateTax(price: number, rate: number, mode: TaxMode): TaxRes
   }
   const tax = cents(price * rate / 100);
   return { net: cents(price), tax, gross: cents(price + tax) };
+}
+
+export function normalizeTaxMode(value: unknown): TaxMode {
+  const mode = String(value ?? "inclusive").replace("_", "-");
+  return mode === "exclusive" || mode === "exempt" || mode === "zero-rated"
+    ? mode
+    : "inclusive";
+}
+
+export function splitTaxComponents(
+  tax: number,
+  configured: TaxComponents,
+): TaxComponents {
+  const entries = Object.entries(configured).filter(
+    ([name, weight]) =>
+      name.trim().length > 0 && Number.isFinite(Number(weight)) && Number(weight) >= 0,
+  );
+  const totalWeight = entries.reduce(
+    (sum, [, weight]) => sum + Number(weight),
+    0,
+  );
+  if (!entries.length || totalWeight <= 0) return { Tax: cents(tax) };
+
+  let remaining = cents(tax);
+  return Object.fromEntries(
+    entries.map(([name, weight], index) => {
+      const amount =
+        index === entries.length - 1
+          ? remaining
+          : cents((tax * Number(weight)) / totalWeight);
+      remaining = cents(remaining - amount);
+      return [name, amount];
+    }),
+  );
 }
 
 export function calculateCartTotal(items: Array<{ price: number; quantity: number; taxRate: number }>) {

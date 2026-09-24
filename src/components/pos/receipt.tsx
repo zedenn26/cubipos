@@ -24,6 +24,13 @@ function text(value: unknown) {
   return value == null ? "" : String(value);
 }
 
+function numericEntries(value: unknown): Array<[string, number]> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return [];
+  return Object.entries(value as Row)
+    .map(([name, amount]) => [name, Number(amount)] as [string, number])
+    .filter(([name, amount]) => name.trim().length > 0 && Number.isFinite(amount));
+}
+
 function address(value: unknown) {
   if (!value || typeof value !== "object") return "";
   const row = value as Row;
@@ -162,6 +169,27 @@ export function Receipt({
     }).format(Number(value ?? 0));
   const quantity = (value: unknown) =>
     Number(value ?? 0).toLocaleString(undefined, { maximumFractionDigits: 3 });
+  const taxFramework = text(business.tax_framework || "Tax");
+  const configuredWeights = numericEntries(business.tax_components);
+  const totalConfiguredWeight = configuredWeights.reduce(
+    (sum, [, weight]) => sum + weight,
+    0,
+  );
+  const componentTotals = Object.entries(
+    items.reduce<Record<string, number>>((totals, item) => {
+      for (const [name, amount] of numericEntries(item.tax_components))
+        totals[name] = Math.round(((totals[name] ?? 0) + amount) * 100) / 100;
+      return totals;
+    }, {}),
+  );
+  const componentRate = (name: string, totalRate: number) => {
+    const weight = configuredWeights.find(([component]) => component === name)?.[1];
+    return totalConfiguredWeight > 0 && weight !== undefined
+      ? (totalRate * weight) / totalConfiguredWeight
+      : componentTotals.length > 0
+        ? totalRate / componentTotals.length
+        : totalRate;
+  };
 
   return (
     <div
@@ -228,45 +256,63 @@ export function Receipt({
                 <strong>Amount</strong>
               </div>
               <div className="receipt-items">
-                {items.map((item, index) => (
-                  <div
-                    className="receipt-item"
-                    key={`${text(item.sku)}-${index}`}
-                  >
-                    <div>
-                      <strong>{text(item.product_name) || "Product"}</strong>
-                      <small>
-                        {quantity(item.quantity)} × {money(item.unit_price)}
-                        {Number(item.discount_amount ?? 0) > 0
-                          ? ` · Discount ${money(item.discount_amount)}`
-                          : ""}
-                      </small>
-                      {Boolean(item.sku || item.tax_code) && (
+                {items.map((item, index) => {
+                  const lineComponents = numericEntries(item.tax_components);
+                  const rate = Number(item.tax_rate ?? 0);
+                  return (
+                    <div
+                      className="receipt-item"
+                      key={`${text(item.sku)}-${index}`}
+                    >
+                      <div>
+                        <strong>{text(item.product_name) || "Product"}</strong>
                         <small>
-                          {[
-                            item.sku && `SKU ${text(item.sku)}`,
-                            item.tax_code && `Tax ${text(item.tax_code)}`,
-                          ]
-                            .filter(Boolean)
-                            .join(" · ")}
+                          {quantity(item.quantity)} × {money(item.unit_price)}
+                          {Number(item.discount_amount ?? 0) > 0
+                            ? ` · Discount ${money(item.discount_amount)}`
+                            : ""}
                         </small>
-                      )}
+                        {Boolean(item.sku || item.tax_code) && (
+                          <small>
+                            {[
+                              item.sku && `SKU ${text(item.sku)}`,
+                              item.tax_code && `HSN/SAC ${text(item.tax_code)}`,
+                            ]
+                              .filter(Boolean)
+                              .join(" · ")}
+                          </small>
+                        )}
+                        <small>
+                          Taxable {money(item.taxable_value)} · {taxFramework}{" "}
+                          {rate}% {money(item.tax_amount)}
+                        </small>
+                        {lineComponents.length > 0 && Number(item.tax_amount) > 0 && (
+                          <small>
+                            {lineComponents
+                              .map(
+                                ([name, amount]) =>
+                                  `${name} ${componentRate(name, rate).toFixed(2)}% ${money(amount)}`,
+                              )
+                              .join(" · ")}
+                          </small>
+                        )}
+                      </div>
+                      <strong>
+                        {money(
+                          item.line_total ??
+                            Number(item.taxable_value ?? 0) +
+                              Number(item.tax_amount ?? 0),
+                        )}
+                      </strong>
                     </div>
-                    <strong>
-                      {money(
-                        item.line_total ??
-                          Number(item.taxable_value ?? 0) +
-                            Number(item.tax_amount ?? 0),
-                      )}
-                    </strong>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
 
               <div className="receipt-rule" aria-hidden="true" />
               <div className="receipt-totals">
                 <div>
-                  <span>Subtotal</span>
+                  <span>Taxable value</span>
                   <span>{money(sale.subtotal)}</span>
                 </div>
                 {Number(sale.discount_total ?? 0) > 0 && (
@@ -275,8 +321,14 @@ export function Receipt({
                     <span>− {money(sale.discount_total)}</span>
                   </div>
                 )}
+                {componentTotals.map(([name, amount]) => (
+                  <div key={name}>
+                    <span>{name}</span>
+                    <span>{money(amount)}</span>
+                  </div>
+                ))}
                 <div>
-                  <span>Tax</span>
+                  <span>Total {taxFramework}</span>
                   <span>{money(sale.tax_total)}</span>
                 </div>
                 <div className="receipt-grand-total">

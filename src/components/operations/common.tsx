@@ -1,5 +1,6 @@
 "use client";
 import { useState } from "react";
+import type { ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import { userMessage } from "@/lib/permissions/errors";
 import { Eye, EyeOff } from "lucide-react";
@@ -20,20 +21,28 @@ export function Form({
   onSave,
   label = "Save",
   confirmation,
+  preview,
 }: {
   fields: Field[];
   onSave: (data: Row) => Promise<void>;
   label?: string;
   confirmation?: string | ((data: Row) => string);
+  preview?: (data: Row) => ReactNode;
 }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const initialValues = () =>
+    Object.fromEntries(fields.map((field) => [field.name, field.value ?? ""]));
+  const [values, setValues] = useState<Row>(initialValues);
   const [visiblePasswords, setVisiblePasswords] = useState<Set<string>>(
     new Set(),
   );
   return (
     <form
       className="form-grid"
+      onChange={(event) => {
+        if (preview) setValues(Object.fromEntries(new FormData(event.currentTarget)));
+      }}
       onSubmit={async (e) => {
         e.preventDefault();
         const form = e.currentTarget;
@@ -46,6 +55,7 @@ export function Form({
         try {
           await onSave(data);
           form.reset();
+          if (preview) setValues(initialValues());
         } catch (e) {
           setError(userMessage(e));
         } finally {
@@ -116,6 +126,7 @@ export function Form({
           )}
         </label>
       ))}
+      {preview && <div className="form-preview">{preview(values)}</div>}
       <Button disabled={busy}>{busy ? "Saving…" : label}</Button>
       {error && <p role="alert">{error}</p>}
     </form>

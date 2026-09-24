@@ -5,6 +5,12 @@ import { supabase } from "@/lib/supabase/client";
 import { userMessage } from "@/lib/permissions/errors";
 import { DataTable, Form, Row } from "./common";
 import {
+  calculateTax,
+  normalizeTaxMode,
+  splitTaxComponents,
+  type TaxComponents,
+} from "@/lib/pos";
+import {
   Search,
   Grid2X2,
   List,
@@ -40,11 +46,53 @@ export function Catalog({ inventory = false }: { inventory?: boolean }) {
     new Set(),
   );
   const [deletingProducts, setDeletingProducts] = useState(false);
+  const [taxFramework, setTaxFramework] = useState("GST");
+  const [taxComponents, setTaxComponents] = useState<TaxComponents>((): TaxComponents =>
+    String(entity.country_code).trim() === "IN"
+      ? { CGST: 50, SGST: 50 }
+      : { Tax: 100 },
+  );
   const money = (value: number) =>
     new Intl.NumberFormat(undefined, {
       style: "currency",
       currency: String(entity.currency_code ?? "INR"),
     }).format(value);
+  const resolvedRate = (product: Row) => {
+    if (
+      product.tax_rate !== "" &&
+      product.tax_rate !== null &&
+      product.tax_rate !== undefined
+    )
+      return Number(product.tax_rate) || 0;
+    const taxCode = taxCodes.find(
+      (code) => String(code.id) === String(product.tax_code_id ?? ""),
+    );
+    if (taxCode) return Number(taxCode.rate ?? 0);
+    const category = categories.find(
+      (candidate) => String(candidate.id) === String(product.category_id ?? ""),
+    );
+    return Number(product.resolved_tax_rate ?? category?.default_tax_rate ?? 0);
+  };
+  const productPricing = (product: Row) => {
+    const rate = resolvedRate(product);
+    const mode = normalizeTaxMode(product.tax_mode);
+    const totals = calculateTax(Number(product.selling_price ?? 0), rate, mode);
+    return {
+      rate,
+      mode,
+      ...totals,
+      components: splitTaxComponents(totals.tax, taxComponents),
+    };
+  };
+  const componentRate = (name: string, rate: number) => {
+    const totalWeight = Object.values(taxComponents).reduce(
+      (sum, weight) => sum + Number(weight),
+      0,
+    );
+    return totalWeight > 0
+      ? (rate * Number(taxComponents[name] ?? 0)) / totalWeight
+      : 0;
+  };
   const refresh = useCallback(async () => {
     if (!storeId) return;
     const [p, c, m, t] = await Promise.all([
@@ -68,14 +116,26 @@ export function Catalog({ inventory = false }: { inventory?: boolean }) {
         .limit(50),
     ]);
     if (c.error || m.error || t.error) throw c.error || m.error || t.error;
-    const tax = await supabase!.from("tax_codes").select("*").order("name");
-    if (tax.error) throw tax.error;
+    const [tax, configuration] = await Promise.all([
+      supabase!.from("tax_codes").select("*").order("name"),
+      supabase!
+        .from("entity_settings")
+        .select("tax_framework,tax_components")
+        .eq("entity_id", profile.entity_id)
+        .maybeSingle(),
+    ]);
+    if (tax.error || configuration.error)
+      throw tax.error || configuration.error;
     setTaxCodes(tax.data);
+    const configured = configuration.data?.tax_components;
+    if (configured && typeof configured === "object" && !Array.isArray(configured))
+      setTaxComponents(configured as TaxComponents);
+    setTaxFramework(String(configuration.data?.tax_framework ?? "Tax"));
     setRows(p);
     setCategories(c.data ?? []);
     setMovements(m.data ?? []);
     setTransfers(t.data ?? []);
-  }, [storeId, search, page, includeArchived]);
+  }, [storeId, search, page, includeArchived, profile.entity_id]);
   useEffect(() => {
     const timer = setTimeout(
       () =>
@@ -441,7 +501,7 @@ export function Catalog({ inventory = false }: { inventory?: boolean }) {
                 },
                 {
                   name: "selling_price",
-                  label: "Selling value",
+                  label: "Price entered (final price when tax is inclusive)",
                   type: "number",
                   value: Number(edit?.selling_price ?? 0),
                 },
@@ -483,13 +543,19 @@ export function Catalog({ inventory = false }: { inventory?: boolean }) {
                 {
                   name: "tax_mode",
                   label: "Tax mode",
-                  value: String(edit?.tax_mode ?? "exclusive"),
+                  value: String(edit?.tax_mode ?? "inclusive"),
                   options: [
-                    "exclusive",
-                    "inclusive",
-                    "exempt",
-                    "zero_rated",
-                  ].map((value) => ({ value, label: value })),
+                    {
+                      value: "inclusive",
+                      label: "Inclusive — entered price is the final price",
+                    },
+                    {
+                      value: "exclusive",
+                      label: "Exclusive — tax is added to the entered price",
+                    },
+                    { value: "exempt", label: "Tax exempt" },
+                    { value: "zero_rated", label: "Zero rated" },
+                  ],
                 },
                 {
                   name: "hsn_sac",
@@ -545,6 +611,48 @@ export function Catalog({ inventory = false }: { inventory?: boolean }) {
                   value: String(edit?.expires_on ?? ""),
                 },
               ]}
+              preview={(data) => {
+                const pricing = productPricing(data);
+                const componentEntries = Object.entries(pricing.components);
+                return (
+                  <section className="tax-preview" aria-live="polite">
+                    <div className="tax-preview-heading">
+                      <div>
+                        <small>PRICE AND TAX PREVIEW</small>
+                        <strong>
+                          {pricing.mode === "inclusive"
+                            ? "Entered price includes tax"
+                            : pricing.mode === "exclusive"
+                              ? "Tax will be added at checkout"
+                              : "No tax will be charged"}
+                        </strong>
+                      </div>
+                      <span>{pricing.rate}% {taxFramework}</span>
+                    </div>
+                    <dl className="tax-preview-values">
+                      <div>
+                        <dt>Taxable value</dt>
+                        <dd>{money(pricing.net)}</dd>
+                      </div>
+                      {componentEntries.map(([name, amount]) => (
+                        <div key={name}>
+                          <dt>
+                            {name}{" "}
+                            {pricing.rate > 0
+                              ? `${componentRate(name, pricing.rate).toFixed(2)}%`
+                              : ""}
+                          </dt>
+                          <dd>{money(amount)}</dd>
+                        </div>
+                      ))}
+                      <div className="tax-preview-total">
+                        <dt>Final selling price</dt>
+                        <dd>{money(pricing.gross)}</dd>
+                      </div>
+                    </dl>
+                  </section>
+                );
+              }}
               onSave={async (d) => {
                 const payload = {
                   ...d,
@@ -976,6 +1084,7 @@ export function Catalog({ inventory = false }: { inventory?: boolean }) {
             {rows.map((r, index) => {
               const stock = Number(r.stock ?? 0);
               const reorder = Number(r.reorder_level ?? 0);
+              const pricing = productPricing(r);
               return (
                 <article
                   className={`catalog-card ${selectedProducts.has(String(r.id)) ? "selected" : ""}`}
@@ -1003,8 +1112,27 @@ export function Catalog({ inventory = false }: { inventory?: boolean }) {
                     <small>{String(r.sku ?? "No SKU")}</small>
                     <h3>{String(r.name)}</h3>
                     <div className="catalog-values">
-                      <strong>{money(Number(r.selling_price ?? 0))}</strong>
+                      <strong>{money(pricing.gross)}</strong>
                       <span>{stock} {String(r.unit ?? "")}</span>
+                    </div>
+                    <div className="catalog-tax">
+                      <span>
+                        {pricing.mode === "inclusive"
+                          ? "Tax included"
+                          : pricing.mode === "exclusive"
+                            ? "Tax added"
+                            : "No tax"}
+                        {pricing.rate > 0 ? ` · ${pricing.rate}% ${taxFramework}` : ""}
+                      </span>
+                      {pricing.tax > 0 && (
+                        <small>
+                          Taxable {money(pricing.net)} · {Object.entries(
+                            pricing.components,
+                          )
+                            .map(([name, amount]) => `${name} ${money(amount)}`)
+                            .join(" + ")}
+                        </small>
+                      )}
                     </div>
                   </div>
                   {productActions(r)}
@@ -1015,8 +1143,22 @@ export function Catalog({ inventory = false }: { inventory?: boolean }) {
           </div>
         ) : (
           <DataTable
-            rows={rows}
-            columns={["name", "sku", "selling_price", "stock", "unit", "expires_on"]}
+            rows={rows.map((row) => {
+              const pricing = productPricing(row);
+              return {
+                ...row,
+                final_price: money(pricing.gross),
+                tax_details:
+                  pricing.tax > 0
+                    ? `${pricing.rate}% ${taxFramework} (${Object.entries(
+                        pricing.components,
+                      )
+                        .map(([name, amount]) => `${name} ${money(amount)}`)
+                        .join(" + ")})`
+                    : "No tax",
+              };
+            })}
+            columns={["name", "sku", "final_price", "tax_details", "stock", "unit", "expires_on"]}
             action={productActions}
             selected={
               !inventory && allowed("products.manage")

@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { calculateCartTotal, calculateTax, financialYearLabel } from "./pos";
+import {
+  calculateCartTotal,
+  calculateTax,
+  financialYearLabel,
+  splitTaxComponents,
+} from "./pos";
 
 describe("POS domain calculations", () => {
   it("splits inclusive GST without floating point drift", () => {
@@ -8,6 +13,18 @@ describe("POS domain calculations", () => {
 
   it("keeps exempt items tax-free", () => {
     expect(calculateTax(250, 18, "exempt").tax).toBe(0);
+  });
+
+  it("splits inclusive GST into the selected invoice components", () => {
+    expect(splitTaxComponents(18, { CGST: 50, SGST: 50 })).toEqual({
+      CGST: 9,
+      SGST: 9,
+    });
+    expect(splitTaxComponents(0.05, { CGST: 50, SGST: 50 })).toEqual({
+      CGST: 0.03,
+      SGST: 0.02,
+    });
+    expect(splitTaxComponents(18, { IGST: 100 })).toEqual({ IGST: 18 });
   });
 
   it("totals a mixed cart", () => {
