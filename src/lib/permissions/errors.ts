@@ -43,6 +43,7 @@ export function userMessage(error: unknown): string {
     "Select a replacement product",
     "Invalid replacement quantity",
     "Daily registers close automatically",
+    "international phone number",
   ];
   if (
     allowed.some((text) =>
