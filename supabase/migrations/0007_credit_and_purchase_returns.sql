@@ -1,0 +1,54 @@
+begin;
+create table customer_accounts(customer_id uuid primary key references customers,entity_id uuid not null references entities,credit_limit numeric(14,2) not null default 0 check(credit_limit>=0),credit_used numeric(14,2) not null default 0 check(credit_used>=0),store_credit numeric(14,2) not null default 0 check(store_credit>=0));
+create table customer_account_movements(id uuid primary key default gen_random_uuid(),entity_id uuid not null references entities,customer_id uuid not null references customers,kind text not null,amount numeric(14,2) not null,reference_id uuid,created_by uuid references profiles,created_at timestamptz not null default now());
+create table purchase_returns(id uuid primary key default gen_random_uuid(),entity_id uuid not null references entities,purchase_id uuid not null references purchase_orders,store_id uuid not null references stores,reason text not null,created_by uuid not null references profiles,created_at timestamptz not null default now());
+create table purchase_return_items(id uuid primary key default gen_random_uuid(),entity_id uuid not null references entities,return_id uuid not null references purchase_returns,purchase_item_id uuid not null references purchase_items,quantity numeric(14,3) not null check(quantity>0));
+create function set_customer_credit(target uuid,maximum numeric) returns void language plpgsql security definer set search_path=public as $$ begin
+ if not can_manage_entity(current_entity_id()) or not exists(select 1 from customers where id=target and entity_id=current_entity_id()) or maximum is null or maximum<0 then raise exception 'Access denied'; end if;
+ insert into customer_accounts(customer_id,entity_id,credit_limit) values(target,current_entity_id(),maximum) on conflict(customer_id) do update set credit_limit=excluded.credit_limit;
+ insert into audit_logs(entity_id,actor_id,action,resource_type,resource_id,metadata) values(current_entity_id(),auth.uid(),'customer.credit_limit','customers',target,jsonb_build_object('limit',maximum));
+end $$;
+create function account_payment_guard() returns trigger language plpgsql security definer set search_path=public as $$ declare s sales%rowtype; begin
+ if new.method not in ('customer_credit','store_credit') then return new; end if;
+ select * into s from sales where id=new.sale_id;
+ if s.customer_id is null then raise exception 'Select a customer for credit payments'; end if;
+ insert into customer_accounts(customer_id,entity_id) values(s.customer_id,s.entity_id) on conflict do nothing;
+ if new.method='customer_credit' then update customer_accounts set credit_used=credit_used+new.amount where customer_id=s.customer_id and credit_used+new.amount<=credit_limit;
+ else update customer_accounts set store_credit=store_credit-new.amount where customer_id=s.customer_id and store_credit>=new.amount; end if;
+ if not found then raise exception 'Insufficient customer credit'; end if;
+ insert into customer_account_movements(entity_id,customer_id,kind,amount,reference_id,created_by) values(s.entity_id,s.customer_id,new.method,new.amount,s.id,auth.uid());return new;
+end $$;
+create trigger credit_payment before insert on payments for each row execute function account_payment_guard();
+create function account_refund_guard() returns trigger language plpgsql security definer set search_path=public as $$ declare customer uuid; tenant uuid; begin
+ if new.method not in ('customer_credit','store_credit') then return new; end if;
+ select s.customer_id,s.entity_id into customer,tenant from returns r join sales s on s.id=r.sale_id where r.id=new.return_id;
+ if customer is null then raise exception 'A customer is required for credit refunds'; end if;
+ insert into customer_accounts(customer_id,entity_id) values(customer,tenant) on conflict do nothing;
+ if new.method='customer_credit' then update customer_accounts set credit_used=credit_used-new.amount where customer_id=customer and credit_used>=new.amount;
+ else update customer_accounts set store_credit=store_credit+new.amount where customer_id=customer;end if;
+ if not found then raise exception 'Refund exceeds outstanding customer credit'; end if;
+ insert into customer_account_movements(entity_id,customer_id,kind,amount,reference_id,created_by) values(tenant,customer,new.method||'_refund',new.amount,new.return_id,auth.uid());return new;
+end $$;
+create trigger credit_refund before insert on refunds for each row execute function account_refund_guard();
+create function return_purchase(target uuid,item uuid,quantity numeric,reason text,request_id uuid) returns void language plpgsql security definer set search_path=public as $$ declare p purchase_orders%rowtype; l purchase_items%rowtype; returned numeric; begin
+ select * into p from purchase_orders where id=target for update;
+ if not can_operate_store(p.store_id) or not has_permission('purchases.manage') then raise exception 'Access denied'; end if;
+ if exists(select 1 from purchase_returns where id=request_id and purchase_id=target) then return;end if;
+ if p.status<>'received' or length(trim(reason))<3 then raise exception 'Received purchase and reason required'; end if;
+ select * into l from purchase_items where id=item and purchase_id=target;
+ select coalesce(sum(pri.quantity),0) into returned from purchase_return_items pri where purchase_item_id=item;
+ if not found or quantity is null or quantity<=0 or quantity>l.quantity-returned then raise exception 'Invalid purchase return quantity'; end if;
+ update inventory set quantity=inventory.quantity-return_purchase.quantity where store_id=p.store_id and product_id=l.product_id and inventory.quantity>=return_purchase.quantity;
+ if not found then raise exception 'Insufficient stock'; end if;
+ insert into purchase_returns(id,entity_id,purchase_id,store_id,reason,created_by) values(request_id,p.entity_id,p.id,p.store_id,reason,auth.uid());
+ insert into purchase_return_items(entity_id,return_id,purchase_item_id,quantity) values(p.entity_id,request_id,item,quantity);
+ insert into inventory_movements(entity_id,store_id,product_id,movement_type,quantity,reference_type,reference_id,created_by) values(p.entity_id,p.store_id,l.product_id,'adjustment',-quantity,'purchase_return',request_id,auth.uid());
+end $$;
+do $$ declare t text; begin foreach t in array array['customer_accounts','customer_account_movements','purchase_returns','purchase_return_items'] loop execute format('alter table %I enable row level security',t);end loop;end $$;
+create policy account_read on customer_accounts for select to authenticated using(can_read_entity(entity_id) and has_permission('customers.read'));
+create policy account_movement_read on customer_account_movements for select to authenticated using(can_read_entity(entity_id) and has_permission('customers.read'));
+create policy purchase_return_read on purchase_returns for select to authenticated using(can_access_store(store_id) and has_permission('purchases.manage'));
+create policy purchase_return_item_read on purchase_return_items for select to authenticated using(exists(select 1 from purchase_returns where id=return_id and can_access_store(store_id) and has_permission('purchases.manage')));
+revoke execute on function set_customer_credit(uuid,numeric), return_purchase(uuid,uuid,numeric,text,uuid) from public;
+grant execute on function set_customer_credit(uuid,numeric), return_purchase(uuid,uuid,numeric,text,uuid) to authenticated;
+commit;

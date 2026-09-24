@@ -40,5 +40,7 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
-/supabase/
 
+# Supabase local CLI state. Migrations, schema and backups are source-controlled.
+/supabase/.temp/
+/supabase/.branches/
