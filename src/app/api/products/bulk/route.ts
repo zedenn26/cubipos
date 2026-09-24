@@ -20,7 +20,7 @@ const headers = [
   "selling_price*",
   "mrp",
   "tax_mode*",
-  "tax_rate_override",
+  "gst_tax_rate*",
   "tax_code",
   "hsn_sac",
   "opening_quantity",
@@ -47,7 +47,7 @@ const rowSchema = z.object({
   selling_price: z.number().min(0).max(1_000_000_000),
   mrp: z.number().min(0).max(1_000_000_000).nullable(),
   tax_mode: z.enum(["inclusive", "exclusive", "exempt", "zero_rated"]),
-  tax_rate: z.number().min(0).max(100).nullable(),
+  tax_rate: z.number().min(0).max(100),
   tax_code: z.string().trim().max(100),
   hsn_sac: z.string().trim().max(100),
   opening_quantity: z.number().min(0).max(100_000_000),
@@ -56,6 +56,14 @@ const rowSchema = z.object({
   manufactured_on: z.string().date().or(z.literal("")),
   expires_on: z.string().date().or(z.literal("")),
   is_active: z.boolean(),
+}).superRefine((row, context) => {
+  if (["inclusive", "exclusive"].includes(row.tax_mode) && row.tax_rate <= 0)
+    context.addIssue({
+      code: "custom",
+      path: ["tax_rate"],
+      message:
+        "must be above 0 for inclusive/exclusive products; use zero_rated or exempt for 0%",
+    });
 });
 
 function normalizedHeader(value: string) {
@@ -191,7 +199,7 @@ export async function GET(request: Request) {
         .order("name"),
       db
         .from("entities")
-        .select("name,currency_code")
+        .select("name,currency_code,country_code")
         .eq("id", profile.entity_id)
         .single(),
     ]);
@@ -200,6 +208,17 @@ export async function GET(request: Request) {
     }
     const topCategories = categories.data.filter((category) => !category.parent_id);
     const subcategories = categories.data.filter((category) => category.parent_id);
+    const availableTaxRates = Array.from(
+      new Set(
+        [
+          ...(String(entity.data.country_code).trim() === "IN"
+            ? [0, 3, 5, 12, 18, 28]
+            : [0]),
+          ...categories.data.map((category) => Number(category.default_tax_rate)),
+          ...taxCodes.data.map((taxCode) => Number(taxCode.rate)),
+        ].filter((rate) => Number.isFinite(rate) && rate >= 0 && rate <= 100),
+      ),
+    ).sort((a, b) => a - b);
 
     const workbook = new Workbook();
     workbook.creator = "CubiPOS by Cubixtop";
@@ -212,11 +231,12 @@ export async function GET(request: Request) {
       ["Required columns", "Columns ending in * must contain a value."],
       ["Categories", "Use an existing category/subcategory from the Categories sheet, or enable Create missing categories during upload."],
       ["Opening quantity", "Stock is added to the store selected during upload and creates an opening-stock ledger entry."],
-      ["Tax", "Leave tax_rate_override blank to inherit the selected tax code/category rate. Tax code must already exist."],
+      ["GST / tax rate", "Required. Select a rate from the dropdown. For 0%, choose zero_rated or exempt as the tax mode."],
+      ["Inclusive price", "For inclusive mode, selling_price is the final customer price and CubiPOS calculates the taxable value and GST inside it."],
       ["Identifiers", "SKU and internal code must be unique in the entity. Barcode and QR identifiers must also be unique."],
       ["Status", "Use active or inactive."],
       ["Dates", "Use YYYY-MM-DD."],
-      ["Example", "Coffee Beans | Grocery & Kitchen | Coffee | COF-001 | COF-001 | 890000000001 | blank | Arabica coffee | Example Brand | pack | 100 | 140 | 160 | exclusive | blank | GST18 | 0901 | 25 | 5 | B-001 | 2026-01-01 | 2027-01-01 | active"],
+      ["Example", "Coffee Beans | Grocery & Kitchen | Coffee | COF-001 | COF-001 | 890000000001 | blank | Arabica coffee | Example Brand | pack | 100 | 140 | 160 | inclusive | 18 | blank | 0901 | 25 | 5 | B-001 | 2026-01-01 | 2027-01-01 | active"],
     ]);
     instructions.getRow(1).font = { bold: true, size: 16, color: { argb: "FF1E7652" } };
     instructions.getColumn(1).font = { bold: true };
@@ -235,7 +255,7 @@ export async function GET(request: Request) {
     products.columns.forEach((column, index) => {
       column.width = [24, 22, 22, 18, 18, 20, 20, 30, 18, 12, 16, 16, 14, 16, 18, 16, 14, 18, 16, 16, 18, 18, 12][index];
     });
-    for (const column of [1, 2, 4, 10, 11, 12, 14]) {
+    for (const column of [1, 2, 4, 10, 11, 12, 14, 15]) {
       products.getCell(1, column).fill = {
         type: "pattern",
         pattern: "solid",
@@ -273,6 +293,11 @@ export async function GET(request: Request) {
         type: "list",
         allowBlank: false,
         formulae: ['"inclusive,exclusive,exempt,zero_rated"'],
+      };
+      products.getCell(row, 15).dataValidation = {
+        type: "list",
+        allowBlank: false,
+        formulae: ["CubiPOSTaxRateChoices"],
       };
       products.getCell(row, 23).dataValidation = {
         type: "list",
@@ -324,6 +349,33 @@ export async function GET(request: Request) {
     }
     categorySheet.getRow(1).font = { bold: true, color: { argb: "FFFFFFFF" } };
     categorySheet.getRow(1).fill = {
+      type: "pattern",
+      pattern: "solid",
+      fgColor: { argb: "FF1E7652" },
+    };
+
+    const taxRateSheet = workbook.addWorksheet("GST Rates");
+    taxRateSheet.columns = [
+      { header: "rate", width: 16 },
+      { header: "use", width: 52 },
+    ];
+    for (const rate of availableTaxRates) {
+      taxRateSheet.addRow([
+        rate,
+        rate === 0
+          ? "Use only with zero_rated or exempt tax mode"
+          : `${rate}% applicable GST / tax`,
+      ]);
+    }
+    workbook.definedNames.add(
+      `'GST Rates'!$A$2:$A$${availableTaxRates.length + 1}`,
+      "CubiPOSTaxRateChoices",
+    );
+    taxRateSheet.getRow(1).font = {
+      bold: true,
+      color: { argb: "FFFFFFFF" },
+    };
+    taxRateSheet.getRow(1).fill = {
       type: "pattern",
       pattern: "solid",
       fgColor: { argb: "FF1E7652" },
@@ -394,7 +446,13 @@ export async function POST(request: Request) {
       "selling_price",
       "tax_mode",
     ];
+    const taxRateHeader = columns.has("gst_tax_rate")
+      ? "gst_tax_rate"
+      : columns.has("tax_rate_override")
+        ? "tax_rate_override"
+        : null;
     const missing = requiredHeaders.filter((header) => !columns.has(header));
+    if (!taxRateHeader) missing.push("gst_tax_rate");
     if (missing.length) {
       return Response.json(
         { error: `Missing required columns: ${missing.join(", ")}` },
@@ -425,7 +483,7 @@ export async function POST(request: Request) {
         selling_price: number(cell(row, "selling_price"), true),
         mrp: number(cell(row, "mrp")),
         tax_mode: text(cell(row, "tax_mode")).toLowerCase(),
-        tax_rate: number(cell(row, "tax_rate_override")),
+        tax_rate: number(cell(row, taxRateHeader!), true),
         tax_code: text(cell(row, "tax_code")),
         hsn_sac: text(cell(row, "hsn_sac")),
         opening_quantity: number(cell(row, "opening_quantity")) ?? 0,

@@ -74,8 +74,8 @@ export function Catalog({ inventory = false }: { inventory?: boolean }) {
     return Number(product.resolved_tax_rate ?? category?.default_tax_rate ?? 0);
   };
   const productPricing = (product: Row) => {
-    const rate = resolvedRate(product);
     const mode = normalizeTaxMode(product.tax_mode);
+    const rate = mode === "exempt" || mode === "zero-rated" ? 0 : resolvedRate(product);
     const totals = calculateTax(Number(product.selling_price ?? 0), rate, mode);
     return {
       rate,
@@ -93,6 +93,20 @@ export function Catalog({ inventory = false }: { inventory?: boolean }) {
       ? (rate * Number(taxComponents[name] ?? 0)) / totalWeight
       : 0;
   };
+  const availableTaxRates = Array.from(
+    new Set(
+      [
+        ...(String(entity.country_code).trim() === "IN"
+          ? [0, 3, 5, 12, 18, 28]
+          : [0]),
+        ...categories.map((category) => Number(category.default_tax_rate ?? 0)),
+        ...taxCodes.map((code) => Number(code.rate ?? 0)),
+        ...(edit?.tax_rate !== null && edit?.tax_rate !== undefined
+          ? [Number(edit.tax_rate)]
+          : []),
+      ].filter((rate) => Number.isFinite(rate) && rate >= 0 && rate <= 100),
+    ),
+  ).sort((a, b) => a - b);
   const refresh = useCallback(async () => {
     if (!storeId) return;
     const [p, c, m, t] = await Promise.all([
@@ -387,8 +401,10 @@ export function Catalog({ inventory = false }: { inventory?: boolean }) {
             </div>
             <p>
               Download the XLSX template containing instructions, your current
-              categories and active tax codes. Complete the Products sheet and
-              upload it here. All rows are validated and committed together.
+              categories, GST-rate dropdown and active tax codes. Every product
+              must select its tax mode and applicable GST/tax rate. Complete the
+              Products sheet and upload it here; all rows are validated and
+              committed together.
             </p>
             <div className="actions">
               <button
@@ -483,7 +499,7 @@ export function Catalog({ inventory = false }: { inventory?: boolean }) {
                     .filter((c) => !c.is_archived)
                     .map((c) => ({
                       value: String(c.id),
-                      label: String(c.name),
+                      label: `${String(c.name)} · default ${Number(c.default_tax_rate ?? 0)}% ${taxFramework}`,
                     })),
                   value: String(edit?.category_id ?? ""),
                 },
@@ -520,11 +536,11 @@ export function Catalog({ inventory = false }: { inventory?: boolean }) {
                 },
                 {
                   name: "tax_code_id",
-                  label: "Tax code (optional)",
+                  label: "Tax code / GST classification (optional)",
                   value: String(edit?.tax_code_id ?? ""),
                   required: false,
                   options: [
-                    { value: "", label: "Category default" },
+                    { value: "", label: "No tax code — use selected rate below" },
                     ...taxCodes
                       .filter((t) => t.is_active)
                       .map((t) => ({
@@ -535,10 +551,25 @@ export function Catalog({ inventory = false }: { inventory?: boolean }) {
                 },
                 {
                   name: "tax_rate",
-                  label: "Tax override % (blank inherits category)",
-                  type: "number",
-                  required: false,
-                  value: String(edit?.tax_rate ?? ""),
+                  label: "Applicable GST / tax rate",
+                  value: String(
+                    edit
+                      ? (edit.tax_rate ?? edit.resolved_tax_rate ?? "")
+                      : "",
+                  ),
+                  options: [
+                    {
+                      value: "",
+                      label: "Select the applicable GST / tax rate",
+                    },
+                    ...availableTaxRates.map((rate) => ({
+                      value: String(rate),
+                      label:
+                        rate === 0
+                          ? `0% — use with Zero rated or Tax exempt`
+                          : `${rate}% ${taxFramework}`,
+                    })),
+                  ],
                 },
                 {
                   name: "tax_mode",
@@ -620,11 +651,14 @@ export function Catalog({ inventory = false }: { inventory?: boolean }) {
                       <div>
                         <small>PRICE AND TAX PREVIEW</small>
                         <strong>
-                          {pricing.mode === "inclusive"
-                            ? "Entered price includes tax"
-                            : pricing.mode === "exclusive"
-                              ? "Tax will be added at checkout"
-                              : "No tax will be charged"}
+                          {["inclusive", "exclusive"].includes(pricing.mode) &&
+                          pricing.rate <= 0
+                            ? "Select the applicable GST / tax rate"
+                            : pricing.mode === "inclusive"
+                              ? "Entered price includes tax"
+                              : pricing.mode === "exclusive"
+                                ? "Tax will be added at checkout"
+                                : "No tax will be charged"}
                         </strong>
                       </div>
                       <span>{pricing.rate}% {taxFramework}</span>
@@ -654,12 +688,21 @@ export function Catalog({ inventory = false }: { inventory?: boolean }) {
                 );
               }}
               onSave={async (d) => {
+                const taxable = ["inclusive", "exclusive"].includes(
+                  String(d.tax_mode),
+                );
+                if (d.tax_rate === "")
+                  throw new Error("Select the applicable GST / tax rate.");
+                if (taxable && Number(d.tax_rate) <= 0)
+                  throw new Error(
+                    "Select a GST rate above 0%, or choose Zero rated / Tax exempt.",
+                  );
                 const payload = {
                   ...d,
                   internal_code: d.internal_code || d.sku,
                   tax_code_id: d.tax_code_id || null,
                   barcode: d.barcode || null,
-                  tax_rate: d.tax_rate === "" ? null : Number(d.tax_rate),
+                  tax_rate: taxable ? Number(d.tax_rate) : 0,
                   selling_price: Number(d.selling_price),
                   purchase_price: Number(d.purchase_price),
                   mrp: d.mrp === "" ? null : Number(d.mrp),
@@ -1118,9 +1161,13 @@ export function Catalog({ inventory = false }: { inventory?: boolean }) {
                     <div className="catalog-tax">
                       <span>
                         {pricing.mode === "inclusive"
-                          ? "Tax included"
+                          ? pricing.rate > 0
+                            ? "Tax included"
+                            : "GST not configured"
                           : pricing.mode === "exclusive"
-                            ? "Tax added"
+                            ? pricing.rate > 0
+                              ? "Tax added"
+                              : "GST not configured"
                             : "No tax"}
                         {pricing.rate > 0 ? ` · ${pricing.rate}% ${taxFramework}` : ""}
                       </span>
@@ -1155,7 +1202,9 @@ export function Catalog({ inventory = false }: { inventory?: boolean }) {
                       )
                         .map(([name, amount]) => `${name} ${money(amount)}`)
                         .join(" + ")})`
-                    : "No tax",
+                    : ["inclusive", "exclusive"].includes(pricing.mode)
+                      ? "GST not configured — edit product"
+                      : "No tax",
               };
             })}
             columns={["name", "sku", "final_price", "tax_details", "stock", "unit", "expires_on"]}
