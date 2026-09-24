@@ -66,6 +66,6 @@ jobs:
             sleep 1
           done
 
-          for route in / /system /admin /pos /sales /returns /products /inventory /customers /purchases /reports /settings; do
+          for route in / /system /admin /pos /sales /returns /products /products/bulk-edit /inventory /customers /purchases /reports /settings; do
             curl --fail --silent --show-error "http://127.0.0.1:3000${route}" > /dev/null
           done

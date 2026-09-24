@@ -1,4 +1,5 @@
 "use client";
+import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import { useWorkspace, rpc } from "@/components/workspace";
 import { supabase } from "@/lib/supabase/client";
@@ -21,6 +22,7 @@ import {
   PackageOpen,
   Trash2,
   CheckSquare,
+  TableProperties,
 } from "lucide-react";
 export function Catalog({ inventory = false }: { inventory?: boolean }) {
   const { profile, entity, storeId, stores, notify, allowed } = useWorkspace();
@@ -388,6 +390,9 @@ export function Catalog({ inventory = false }: { inventory?: boolean }) {
               >
                 <CheckSquare size={17} /> Bulk add products
               </button>
+              <Link className="button-link" href="/products/bulk-edit">
+                <TableProperties size={17} /> Bulk edit products
+              </Link>
             </div>
           </section>
           {manageMode === "bulk" && (
