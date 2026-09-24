@@ -14,6 +14,9 @@ import {
   ShoppingBasket,
   BadgePercent,
   Sparkles,
+  Clock3,
+  Mail,
+  CalendarCheck2,
 } from "lucide-react";
 import {
   ResponsiveContainer,
@@ -23,6 +26,28 @@ import {
   YAxis,
   Tooltip,
 } from "recharts";
+
+const DAY_MS = 86_400_000;
+
+function dateValue(value: unknown) {
+  const match = String(value ?? "").match(/^(\d{4})-(\d{2})-(\d{2})/);
+  return match
+    ? Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3]))
+    : null;
+}
+
+function displayDate(value: unknown) {
+  const timestamp = dateValue(value);
+  return timestamp === null
+    ? "Not configured"
+    : new Intl.DateTimeFormat(undefined, {
+        day: "numeric",
+        month: "long",
+        year: "numeric",
+        timeZone: "UTC",
+      }).format(new Date(timestamp));
+}
+
 export function Reports({
   dashboard = false,
   salesOnly = false,
@@ -43,6 +68,38 @@ export function Reports({
   const [page, setPage] = useState(0);
   const [receipt, setReceipt] = useState("");
   const [busy, setBusy] = useState(false);
+  const expiryTimestamp = dateValue(entity.subscription_expiry);
+  const today = new Date();
+  const todayTimestamp = Date.UTC(
+    today.getFullYear(),
+    today.getMonth(),
+    today.getDate(),
+  );
+  const daysRemaining =
+    expiryTimestamp === null
+      ? null
+      : Math.round((expiryTimestamp - todayTimestamp) / DAY_MS);
+  const subscriptionTone =
+    daysRemaining === null
+      ? "neutral"
+      : daysRemaining < 0
+        ? "expired"
+        : daysRemaining <= 30
+          ? "warning"
+          : "active";
+  const subscriptionStatus =
+    daysRemaining === null
+      ? "Validity date pending"
+      : daysRemaining < 0
+        ? `Expired ${Math.abs(daysRemaining)} day${Math.abs(daysRemaining) === 1 ? "" : "s"} ago`
+        : daysRemaining === 0
+          ? "Expires today"
+          : `${daysRemaining} day${daysRemaining === 1 ? "" : "s"} remaining`;
+  const renewalEmail = `mailto:info@cubixtop.com?subject=${encodeURIComponent(
+    `CubiPOS subscription extension request - ${String(entity.name ?? "Business")}`,
+  )}&body=${encodeURIComponent(
+    `Hello Cubixtop team,\n\nPlease review a subscription validity extension for ${String(entity.name ?? "our business")}.\nCurrent valid-until date: ${displayDate(entity.subscription_expiry)}.\nRequested by: ${profile.display_name} (${profile.email ?? profile.role}).\n\nPlease contact us with the available extension options.`,
+  )}`;
   const range = useMemo(
     () => ({
       starts_at: new Date(`${from}T00:00:00`).toISOString(),
@@ -150,18 +207,47 @@ export function Reports({
   return (
     <>
       {dashboard && (
-        <section className="dashboard-hero">
-          <div className="hero-icon"><Sparkles size={25} /></div>
-          <div>
-            <p className="eyebrow">LIVE BUSINESS SNAPSHOT</p>
-            <h2>Welcome back, {profile.display_name.split(" ")[0]}!</h2>
-            <p>Sales, stock and customer activity for your authorized stores are ready below.</p>
-          </div>
-          <div className="hero-actions">
-            {allowed("sales.create") && <Link href="/pos">Start new sale <ArrowRight size={16} /></Link>}
-            {allowed("inventory.read") && <Link href="/inventory">Check inventory <ArrowRight size={16} /></Link>}
-          </div>
-        </section>
+        <>
+          <section className="dashboard-hero">
+            <div className="hero-icon"><Sparkles size={25} /></div>
+            <div>
+              <p className="eyebrow">LIVE BUSINESS SNAPSHOT</p>
+              <h2>Welcome back, {profile.display_name.split(" ")[0]}!</h2>
+              <p>Sales, stock and customer activity for your authorized stores are ready below.</p>
+            </div>
+            <div className="hero-actions">
+              {allowed("sales.create") && <Link href="/pos">Start new sale <ArrowRight size={16} /></Link>}
+              {allowed("inventory.read") && <Link href="/inventory">Check inventory <ArrowRight size={16} /></Link>}
+            </div>
+          </section>
+          {(["entity_admin", "store_manager"].includes(profile.role)) && (
+            <section className={`subscription-card ${subscriptionTone}`}>
+              <span className="subscription-icon">
+                {subscriptionTone === "active" ? <CalendarCheck2 size={24} /> : <Clock3 size={24} />}
+              </span>
+              <div className="subscription-copy">
+                <p className="eyebrow">SUBSCRIPTION VALIDITY</p>
+                <h2>
+                  {expiryTimestamp === null
+                    ? "Confirm your CubiPOS validity"
+                    : `Valid until ${displayDate(entity.subscription_expiry)}`}
+                </h2>
+                <p>
+                  {subscriptionStatus}. To extend your validity, email Cubixtop.
+                  After the request is reviewed and approved, the System Super
+                  Admin will update this date.
+                </p>
+              </div>
+              <dl className="subscription-dates">
+                <div><dt>Started</dt><dd>{displayDate(entity.subscription_start)}</dd></div>
+                <div><dt>Valid through</dt><dd>{displayDate(entity.subscription_expiry)}</dd></div>
+              </dl>
+              <a className="subscription-email" href={renewalEmail}>
+                <Mail size={17} /> Email info@cubixtop.com
+              </a>
+            </section>
+          )}
+        </>
       )}
       <section className="panel report-filters">
         <div className="form-grid">

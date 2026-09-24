@@ -194,9 +194,8 @@ export function SystemDashboard() {
             },
             {
               name: "subscription_expiry",
-              label: "Subscription expiry",
+              label: "Subscription valid until (inclusive)",
               type: "date",
-              required: false,
             },
           ]}
           onSave={async (d) => {
@@ -265,6 +264,7 @@ export function SystemDashboard() {
             "users",
             "sessions",
             "max_concurrent_sessions",
+            "subscription_expiry",
             "status",
           ]}
           action={(r) => (
@@ -275,6 +275,11 @@ export function SystemDashboard() {
       {edit && (
         <section className="panel">
           <h2>Edit {String(edit.name)}</h2>
+          <p>
+            Set the inclusive validity date after reviewing the entity&apos;s
+            extension request. The updated date is shown immediately on its
+            Entity Admin and Store Manager dashboards.
+          </p>
           <Form
             key={String(edit.id)}
             confirmation={(data) =>
@@ -307,9 +312,8 @@ export function SystemDashboard() {
               })),
               {
                 name: "subscription_expiry",
-                label: "Subscription expiry",
+                label: "Subscription valid until (inclusive)",
                 type: "date",
-                required: false,
                 value: String(edit.subscription_expiry ?? ""),
               },
             ]}
