@@ -1,0 +1,78 @@
+name: CubiPOS CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cubipos-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Lint, test, build and smoke test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      NEXT_PUBLIC_SUPABASE_URL: https://example.supabase.co
+      NEXT_PUBLIC_SUPABASE_ANON_KEY: ci-anon-key
+      NEXT_PUBLIC_APP_URL: http://127.0.0.1:3000
+      SUPABASE_SERVICE_ROLE_KEY: ci-service-role-key
+      SYSTEM_ADMIN_EMAIL: ci-admin@example.com
+      REPORT_SECRET: ci-report-secret
+      CRON_SECRET: ci-cron-secret
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Use Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.x
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Verify generated database bundles
+        run: |
+          npm run db:schema
+          npm run db:bundle -- 0016
+          npm run db:backup
+          git diff --exit-code -- supabase/schema.sql supabase/upgrade.sql supabase/backups/cubipos-complete-schema.sql supabase/backups/SHA256SUMS
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Test application and database workflows
+        run: npm test -- --reporter=verbose
+
+      - name: Build production application
+        run: npm run build
+
+      - name: Smoke test production routes
+        shell: bash
+        run: |
+          npm run start -- --hostname 127.0.0.1 --port 3000 > /tmp/cubipos-next.log 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+
+          for attempt in {1..30}; do
+            if curl --fail --silent http://127.0.0.1:3000/ > /dev/null; then
+              break
+            fi
+            if ! kill -0 "$server_pid" 2>/dev/null; then
+              cat /tmp/cubipos-next.log
+              exit 1
+            fi
+            sleep 1
+          done
+
+          for route in / /system /admin /pos /sales /returns /products /inventory /customers /purchases /reports /settings; do
+            curl --fail --silent --show-error "http://127.0.0.1:3000${route}" > /dev/null
+          done
